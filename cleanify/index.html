@@ -434,6 +434,19 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 
 <div class="toast" id="toast"></div>
 
+<!-- SCOPE ERROR MODAL -->
+<div class="modal-ov" id="scope-modal">
+  <div class="msheet">
+    <div class="mhandle"></div>
+    <div style="font-size:36px;text-align:center;margin-bottom:12px">🔐</div>
+    <div class="mtitle" style="text-align:center">Permission needed</div>
+    <div class="msub" style="text-align:center">Cleanify needs permission to remove tracks. Please reconnect your Spotify account — it only takes a second.</div>
+    <div class="macts">
+      <button class="btn-mconfirm" style="background:var(--gdim);border-color:rgba(29,185,84,.3);color:var(--green)" onclick="document.getElementById('scope-modal').classList.remove('open');startLogin()">Reconnect Spotify</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ─────────────────────────────────────────────
 // SPOTIFY CONFIG
@@ -620,6 +633,9 @@ async function deleteFromSpotify(uris) {
       method: 'DELETE',
       body: JSON.stringify({ ids: batch })
     });
+    if (res.status === 403) {
+      throw new Error('403_SCOPE');
+    }
     if (res.status !== 200 && res.status !== 204) {
       let msg = `HTTP ${res.status}`;
       try { const e = await res.json(); msg = e?.error?.message || msg; } catch(_){}
@@ -737,9 +753,23 @@ function filteredTracks() {
   const q = (document.getElementById('t-search')?.value||'').toLowerCase().trim();
   if (q) {
     const terms = q.split(/\s+/);
+    // Filter: all terms must appear somewhere
     r = r.filter(t => {
       const hay = (t.name + ' ' + t.artist + ' ' + t.album).toLowerCase();
       return terms.every(term => hay.includes(term));
+    });
+    // Sort: score by how well track name matches
+    // 0 = exact track name, 1 = track name starts with query, 2 = track name contains query, 3 = artist/album only
+    r = [...r].sort((a, b) => {
+      const score = t => {
+        const n = t.name.toLowerCase();
+        if (n === q) return 0;
+        if (n.startsWith(q)) return 1;
+        if (n.includes(q)) return 2;
+        if (terms.every(term => n.includes(term))) return 3;
+        return 4; // match is in artist/album only
+      };
+      return score(a) - score(b);
     });
   }
   vFilteredCache = r;
@@ -747,7 +777,7 @@ function filteredTracks() {
 }
 
 function renderTracks() {
-  vFilteredCache = null; // invalidate cache on explicit render call
+  vFilteredCache = null;
   const ft = filteredTracks();
   document.getElementById('tc-pill').textContent = `${tracks.length} tracks`;
   document.getElementById('t-sec').textContent = `${ft.length} songs`;
@@ -755,14 +785,22 @@ function renderTracks() {
   const scrollEl = document.getElementById('t-scroll');
   const content = document.getElementById('t-content');
 
+  // Always wipe existing rows on explicit render (filter/search changed)
+  content.querySelectorAll('.track-row[data-idx]').forEach(el => el.remove());
+
   if (!ft.length) {
     content.style.height = '';
     content.style.position = '';
-    content.innerHTML = `<div class="empty"><div class="empty-icon">♫</div><div class="empty-text">No tracks found</div><div class="empty-sub">Try a different filter</div></div>`;
+    if (!content.querySelector('.empty')) {
+      content.innerHTML = `<div class="empty"><div class="empty-icon">♫</div><div class="empty-text">No tracks found</div><div class="empty-sub">Try a different filter or search</div></div>`;
+    }
     updateSelBars(); return;
   }
 
   // Set total height so scrollbar is correct
+  // Clear any empty state message first
+  const emptyEl = content.querySelector('.empty');
+  if (emptyEl) emptyEl.remove();
   content.style.position = 'relative';
   content.style.height = (ft.length * VROW_H) + 'px';
 
@@ -1050,8 +1088,17 @@ async function confirmDel(){
   if (currentTab === 'songs') renderTracks();
   else if (currentTab === 'artists') renderArtists();
   toast(`Removing ${count} track${count!==1?'s':''}…`);
-  try{ await deleteFromSpotify(uris); toast(`Removed ${count} track${count!==1?'s':''}  ✓`); }
-  catch(e){ toast(`Error: ${e.message}`); console.error(e); }
+  try {
+    await deleteFromSpotify(uris);
+    toast(`Removed ${count} track${count!==1?'s':''}  ✓`);
+  } catch(e) {
+    if (e.message === '403_SCOPE') {
+      showScopeError();
+    } else {
+      toast(`Error: ${e.message}`);
+      console.error(e);
+    }
+  }
 }
 
 // ── SWIPE ──
@@ -1293,9 +1340,17 @@ async function applySwipeDel() {
     decisions = [];
     continueSwipe();
   } catch(e) {
-    toast(`Error: ${e.message}`);
-    console.error(e);
+    if (e.message === '403_SCOPE') showScopeError();
+    else { toast(`Error: ${e.message}`); console.error(e); }
   }
+}
+
+function showScopeError() {
+  // Clear existing token so next login re-grants all scopes
+  ['sp_token','sp_expiry','sp_refresh'].forEach(k => localStorage.removeItem(k));
+  accessToken = null;
+  // Show modal
+  document.getElementById('scope-modal').classList.add('open');
 }
 
 // ── TOAST ──
