@@ -362,7 +362,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
     <div class="sppill" id="sp-label">0 / 0</div>
   </div>
   <div class="sprogbar"><div class="sprogfill" id="sp-fill" style="width:0%"></div></div>
-  <div class="swipe-info"><span>✦</span> Swipe ← remove &nbsp;·&nbsp; → keep &nbsp;·&nbsp; 20 tracks</div>
+  <div class="swipe-info"><span>✦</span> Swipe ← remove &nbsp;·&nbsp; → keep &nbsp;·&nbsp; tap ▶ to preview</div>
   <div class="card-stack" id="card-stack"></div>
   <div class="swipe-acts" id="swipe-acts">
     <button class="swipe-btn btn-undo" id="undo-btn" onclick="undoSwipe()" disabled>↩</button>
@@ -613,20 +613,17 @@ async function loadLibrary() {
 
 async function deleteFromSpotify(uris) {
   const BATCH = 50;
-  for (let i = 0; i < uris.length; i += BATCH) {
-    const batch = uris.slice(i, i + BATCH);
-    // Try Feb 2026 unified endpoint first, fallback to old
-    let res = await api('https://api.spotify.com/v1/me/library', {
+  const ids = uris.map(u => u.replace('spotify:track:',''));
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const batch = ids.slice(i, i + BATCH);
+    const res = await api('https://api.spotify.com/v1/me/tracks', {
       method: 'DELETE',
-      body: JSON.stringify({ uris: batch })
+      body: JSON.stringify({ ids: batch })
     });
-    if (res.status === 404 || res.status === 405) {
-      res = await api('https://api.spotify.com/v1/me/tracks', {
-        method: 'DELETE',
-        body: JSON.stringify({ ids: batch.map(u => u.replace('spotify:track:','')) })
-      });
+    if (!res.ok && res.status !== 200 && res.status !== 204) {
+      const errBody = await res.json().catch(()=>({}));
+      throw new Error(`Delete failed: ${res.status} — ${errBody?.error?.message||''}`);
     }
-    if (!res.ok && res.status !== 200 && res.status !== 204) throw new Error(`Delete failed: ${res.status}`);
   }
 }
 
@@ -670,7 +667,7 @@ function goTab(tab) {
   stopLP(); stopSA();
   if (tab === 'songs') { vFilteredCache = null; renderTracks(); }
   if (tab === 'artists') renderArtists();
-  if (tab === 'swipe') initSwipe();
+  if (tab === 'swipe') initSwipe(true);
 }
 
 function setLoad(main, sub) {
@@ -949,6 +946,10 @@ function togglePrev(e, id) {
 
 function startLP(t) {
   stopLP();
+  if (!t.preview_url) {
+    toast('No preview — Spotify removed this track\'s audio sample');
+    return;
+  }
   lpId = t.id; lpSec = 0;
   const page = currentTab === 'artists' ? 'a' : 't';
   document.getElementById(`${page}-pbar`).classList.add('on');
@@ -956,28 +957,24 @@ function startLP(t) {
   document.getElementById(`${page}-pb-fill`).style.width = '0%';
   document.getElementById(`${page}-pb-time`).textContent = '0:10';
 
-  document.querySelectorAll('.tart').forEach(el=>{el.classList.remove('playing');const ps=el.querySelector('.pov span');if(ps)ps.textContent='▶';});
-  document.querySelectorAll('.splay').forEach(el=>{el.classList.remove('playing');el.textContent='▶';});
-  const ae=document.getElementById(`art-${t.id}`), se=document.getElementById(`splay-${t.id}`);
-  if(ae){ae.classList.add('playing');const ps=ae.querySelector('.pov span');if(ps)ps.textContent='⏹';}
-  if(se){se.classList.add('playing');se.textContent='⏹';}
+  document.querySelectorAll('.tart').forEach(el => { el.classList.remove('playing'); const ps = el.querySelector('.pov span'); if (ps) ps.textContent = '▶'; });
+  document.querySelectorAll('.splay').forEach(el => { el.classList.remove('playing'); el.textContent = '▶'; });
+  const ae = document.getElementById(`art-${t.id}`), se = document.getElementById(`splay-${t.id}`);
+  if (ae) { ae.classList.add('playing'); const ps = ae.querySelector('.pov span'); if (ps) ps.textContent = '⏹'; }
+  if (se) { se.classList.add('playing'); se.textContent = '⏹'; }
 
-  if (t.preview_url) {
-    lpAudio = new Audio(t.preview_url);
-    lpAudio.volume = 0.72;
-    lpAudio.play().catch(() => { toast('Preview unavailable for this track'); });
-    setTimeout(() => { if (lpAudio) { lpAudio.pause(); lpAudio = null; } }, 10000);
-  } else {
-    toast('No preview available');
-  }
+  lpAudio = new Audio(t.preview_url);
+  lpAudio.volume = 0.72;
+  lpAudio.play().catch(() => { toast('Preview unavailable — try another track'); stopLP(); });
+  setTimeout(() => { if (lpAudio) { lpAudio.pause(); lpAudio = null; } }, 10000);
 
-  lpInt = setInterval(()=>{
+  lpInt = setInterval(() => {
     lpSec++;
-    const pf=document.getElementById(`${page}-pb-fill`),pt=document.getElementById(`${page}-pb-time`);
-    if(pf)pf.style.width=(lpSec/10*100)+'%';
-    if(pt)pt.textContent=`0:${String(10-lpSec).padStart(2,'0')}`;
-    if(lpSec>=10)stopLP();
-  },1000);
+    const pf = document.getElementById(`${page}-pb-fill`), pt = document.getElementById(`${page}-pb-time`);
+    if (pf) pf.style.width = (lpSec / 10 * 100) + '%';
+    if (pt) pt.textContent = `0:${String(10 - lpSec).padStart(2, '0')}`;
+    if (lpSec >= 10) stopLP();
+  }, 1000);
 }
 
 function stopLP(){
@@ -1012,29 +1009,39 @@ async function confirmDel(){
 }
 
 // ── SWIPE ──
-const SLIM = 20;
+// sq = full shuffled queue (all tracks), si = current index
+// decisions = [{track, action}] for this session
+// sessionRemoved = total removed so far this session (persists across "review more" clicks)
+let sessionRemoved = 0;
+let audioUnlocked = false; // iOS requires a user gesture to unlock audio
 
-function initSwipe(){
+function initSwipe(fresh) {
   stopSA();
-  sq=[...tracks].sort(()=>Math.random()-.5).slice(0,SLIM);
-  si=0;decisions=[];
-  document.getElementById('undo-btn').disabled=true;
-  document.querySelectorAll('.swipe-btn').forEach(b=>b.style.display='');
-  buildCards();updateSP();setTimeout(playCard,150);
+  if (fresh || sq.length === 0) {
+    sq = [...tracks].sort(() => Math.random() - .5);
+    si = 0; decisions = []; sessionRemoved = 0;
+  }
+  document.getElementById('undo-btn').disabled = true;
+  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = '');
+  buildCards(); updateSP();
+  // Attempt autoplay — will work if audio already unlocked by prior gesture
+  setTimeout(playCard, 150);
 }
 
-function buildCards(){
-  const s=document.getElementById('card-stack');s.innerHTML='';
-  if(si>=sq.length){showDone();return;}
-  for(let i=Math.min(si+1,sq.length-1);i>=si;i--){
-    const t=sq[i],front=i===si;
-    const card=document.createElement('div');
-    card.className='swipe-card '+(front?'front':'behind');
-    card.id=`sc-${t.id}`;
-    const bars=Array.from({length:28},(_,j)=>`<div class="wbar" id="wb-${t.id}-${j}" style="height:${4+Math.random()*18}px"></div>`).join('');
-    card.innerHTML=`
+function buildCards() {
+  const s = document.getElementById('card-stack');
+  s.innerHTML = '';
+  if (si >= sq.length) { showDone(); return; }
+  // Show current + next card (peek behind)
+  for (let i = Math.min(si + 1, sq.length - 1); i >= si; i--) {
+    const t = sq[i], front = i === si;
+    const card = document.createElement('div');
+    card.className = 'swipe-card ' + (front ? 'front' : 'behind');
+    card.id = `sc-${t.id}`;
+    const bars = Array.from({length:28}, (_, j) => `<div class="wbar" id="wb-${t.id}-${j}" style="height:${4+Math.random()*18}px"></div>`).join('');
+    card.innerHTML = `
       <div class="chero">
-        <div style="position:absolute;inset:0;z-index:0">${artEl(t,true)}</div>
+        <div style="position:absolute;inset:0;z-index:0">${artEl(t, true)}</div>
         <div class="waveform" id="wf-${t.id}">${bars}</div>
         <div class="hint-del" id="hd-${t.id}">REMOVE</div>
         <div class="hint-keep" id="hk-${t.id}">KEEP</div>
@@ -1044,137 +1051,202 @@ function buildCards(){
         <div class="cartist">${esc(t.artist)}</div>
         <div class="cmeta"><div class="calbum">${esc(t.album)}</div>${ageBadge(t.added)}</div>
         <div class="aprog"><div class="aprogf" id="swp-${t.id}"></div></div>
-        <div class="atrow"><span id="swt-${t.id}">0:00</span><span>0:30</span></div>
+        <div class="atrow"><span id="swt-${t.id}">0:00</span><span>${t.preview_url ? '0:30' : 'No preview'}</span></div>
       </div>`;
     s.appendChild(card);
-    if(front)bindDrag(card,t);
+    if (front) bindDrag(card, t);
   }
 }
 
-function bindDrag(card,track){
-  let sx=0,cx=0,dragging=false;
-  const THRESH=80;
-  const start=e=>{dragging=true;sx=e.touches?e.touches[0].clientX:e.clientX;card.style.transition='none';};
-  const move=e=>{
-    if(!dragging)return;
-    cx=(e.touches?e.touches[0].clientX:e.clientX)-sx;
-    card.style.transform=`translateX(${cx}px) rotate(${cx*.06}deg)`;
-    const p=Math.min(Math.abs(cx)/THRESH,1);
-    document.getElementById(`hd-${track.id}`).style.opacity=cx<0?p:0;
-    document.getElementById(`hk-${track.id}`).style.opacity=cx>0?p:0;
+function bindDrag(card, track) {
+  let sx = 0, cx = 0, dragging = false;
+  const THRESH = 80;
+  const start = e => {
+    dragging = true;
+    sx = e.touches ? e.touches[0].clientX : e.clientX;
+    card.style.transition = 'none';
+    // Unlock audio on first touch gesture (iOS requirement)
+    if (!audioUnlocked) unlockAudio();
   };
-  const end=()=>{
-    if(!dragging)return;dragging=false;card.style.transition='';
-    if(cx<-THRESH)animOut(card,'left',()=>commit('delete',track));
-    else if(cx>THRESH)animOut(card,'right',()=>commit('keep',track));
-    else{card.style.transform='';document.getElementById(`hd-${track.id}`).style.opacity=0;document.getElementById(`hk-${track.id}`).style.opacity=0;}
-    cx=0;
+  const move = e => {
+    if (!dragging) return;
+    cx = (e.touches ? e.touches[0].clientX : e.clientX) - sx;
+    card.style.transform = `translateX(${cx}px) rotate(${cx * .06}deg)`;
+    const p = Math.min(Math.abs(cx) / THRESH, 1);
+    const hd = document.getElementById(`hd-${track.id}`);
+    const hk = document.getElementById(`hk-${track.id}`);
+    if (hd) hd.style.opacity = cx < 0 ? p : 0;
+    if (hk) hk.style.opacity = cx > 0 ? p : 0;
   };
-  card.addEventListener('touchstart',start,{passive:true});
-  card.addEventListener('touchmove',move,{passive:true});
-  card.addEventListener('touchend',end);
-  card.addEventListener('mousedown',start);
-  window.addEventListener('mousemove',move);
-  window.addEventListener('mouseup',end);
+  const end = () => {
+    if (!dragging) return; dragging = false; card.style.transition = '';
+    if (cx < -THRESH) animOut(card, 'left', () => commit('delete', track));
+    else if (cx > THRESH) animOut(card, 'right', () => commit('keep', track));
+    else {
+      card.style.transform = '';
+      const hd = document.getElementById(`hd-${track.id}`);
+      const hk = document.getElementById(`hk-${track.id}`);
+      if (hd) hd.style.opacity = 0;
+      if (hk) hk.style.opacity = 0;
+    }
+    cx = 0;
+  };
+  card.addEventListener('touchstart', start, {passive: true});
+  card.addEventListener('touchmove', move, {passive: true});
+  card.addEventListener('touchend', end);
+  card.addEventListener('mousedown', start);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
 }
 
-function animOut(card,dir,cb){
-  card.style.transition='transform .3s cubic-bezier(.4,0,.2,1),opacity .3s';
-  card.style.transform=`translateX(${dir==='left'?-700:700}px) rotate(${dir==='left'?-25:25}deg)`;
-  card.style.opacity='0';
-  setTimeout(cb,300);
+function unlockAudio() {
+  // Play a silent buffer to unlock iOS audio context
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination); src.start(0);
+    ctx.resume().then(() => { audioUnlocked = true; playCard(); });
+  } catch(e) { audioUnlocked = true; }
 }
 
-function commit(action,track){
-  decisions.push({track,action});si++;
-  document.getElementById('undo-btn').disabled=false;
-  buildCards();updateSP();stopSA();
-  if(si<sq.length)setTimeout(playCard,80);
+function animOut(card, dir, cb) {
+  card.style.transition = 'transform .3s cubic-bezier(.4,0,.2,1),opacity .3s';
+  card.style.transform = `translateX(${dir === 'left' ? -700 : 700}px) rotate(${dir === 'left' ? -25 : 25}deg)`;
+  card.style.opacity = '0';
+  setTimeout(cb, 300);
 }
 
-function doSwipe(action){
-  if(si>=sq.length)return;
-  const t=sq[si],card=document.getElementById(`sc-${t.id}`);
-  if(card)animOut(card,action==='delete'?'left':'right',()=>commit(action,t));
-  else commit(action,t);
+function commit(action, track) {
+  decisions.push({track, action});
+  si++;
+  if (action === 'delete') sessionRemoved++;
+  document.getElementById('undo-btn').disabled = false;
+  buildCards(); updateSP(); stopSA();
+  setTimeout(playCard, 80);
 }
 
-function undoSwipe(){
-  if(!decisions.length)return;
-  decisions.pop();si=Math.max(0,si-1);
-  if(!decisions.length)document.getElementById('undo-btn').disabled=true;
-  stopSA();buildCards();updateSP();setTimeout(playCard,80);toast('Went back ↩');
+function doSwipe(action) {
+  if (si >= sq.length) return;
+  // Unlock audio on button tap (gesture)
+  if (!audioUnlocked) unlockAudio();
+  const t = sq[si], card = document.getElementById(`sc-${t.id}`);
+  if (card) animOut(card, action === 'delete' ? 'left' : 'right', () => commit(action, t));
+  else commit(action, t);
 }
 
-function updateSP(){
-  document.getElementById('sp-label').textContent=`${si}/${sq.length}`;
-  document.getElementById('sp-fill').style.width=(sq.length?si/sq.length*100:0)+'%';
+function undoSwipe() {
+  if (!decisions.length) return;
+  const last = decisions.pop();
+  if (last.action === 'delete') sessionRemoved = Math.max(0, sessionRemoved - 1);
+  si = Math.max(0, si - 1);
+  if (!decisions.length) document.getElementById('undo-btn').disabled = true;
+  stopSA(); buildCards(); updateSP(); setTimeout(playCard, 80); toast('Went back ↩');
 }
 
-function playCard(){
-  if(si>=sq.length)return;
-  const t=sq[si];stopSA();sAudioPos=0;ppBtn('▶');
-  if(!t.preview_url)return;
+function updateSP() {
+  const remaining = sq.length - si;
+  document.getElementById('sp-label').textContent = `${sessionRemoved} removed · ${remaining} left`;
+  // Progress bar shows how far through the queue we are
+  document.getElementById('sp-fill').style.width = (sq.length ? si / sq.length * 100 : 0) + '%';
+}
+
+function playCard() {
+  if (si >= sq.length) return;
+  const t = sq[si];
+  stopSA(); sAudioPos = 0; ppBtn('▶');
+  if (!t.preview_url) return;
   sAudio = new Audio(t.preview_url);
   sAudio.volume = 0.75;
-  sAudio.play().then(()=>{sAudioPlaying=true;ppBtn('⏸');startSAInt(t.id);}).catch(()=>ppBtn('▶'));
-  sAudio.onended=()=>{sAudioPlaying=false;ppBtn('▶');};
+  sAudio.play()
+    .then(() => { sAudioPlaying = true; ppBtn('⏸'); startSAInt(t.id); })
+    .catch(() => { ppBtn('▶'); }); // silently fail if autoplay blocked
+  sAudio.onended = () => { sAudioPlaying = false; ppBtn('▶'); };
 }
 
-function startSAInt(tid){
+function startSAInt(tid) {
   clearInterval(sAudioInt);
-  sAudioInt=setInterval(()=>{
-    if(!sAudio||sAudio.paused){clearInterval(sAudioInt);sAudioPlaying=false;ppBtn('▶');return;}
-    sAudioPos=sAudio.currentTime||0;
-    const pf=document.getElementById(`swp-${tid}`),pt=document.getElementById(`swt-${tid}`);
-    if(pf)pf.style.width=Math.min(sAudioPos/30*100,100)+'%';
-    if(pt){const s=Math.floor(sAudioPos);pt.textContent=`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
+  sAudioInt = setInterval(() => {
+    if (!sAudio || sAudio.paused) { clearInterval(sAudioInt); sAudioPlaying = false; ppBtn('▶'); return; }
+    sAudioPos = sAudio.currentTime || 0;
+    const pf = document.getElementById(`swp-${tid}`), pt = document.getElementById(`swt-${tid}`);
+    if (pf) pf.style.width = Math.min(sAudioPos / 30 * 100, 100) + '%';
+    if (pt) { const s = Math.floor(sAudioPos); pt.textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; }
     waveAnim(tid);
-  },80);
+  }, 80);
 }
 
-function waveAnim(tid){
-  const total=28,prog=sAudioPos/30;
-  for(let i=0;i<total;i++){
-    const b=document.getElementById(`wb-${tid}-${i}`);if(!b)continue;
-    if(i/total<prog){b.classList.add('lit');b.style.height=(6+Math.abs(Math.sin(Date.now()/150+i*.7))*16)+'px';}
-    else{b.classList.remove('lit');b.style.height=(3+Math.abs(Math.sin(i*1.3))*12)+'px';}
+function waveAnim(tid) {
+  const total = 28, prog = sAudioPos / 30;
+  for (let i = 0; i < total; i++) {
+    const b = document.getElementById(`wb-${tid}-${i}`); if (!b) continue;
+    if (i / total < prog) { b.classList.add('lit'); b.style.height = (6 + Math.abs(Math.sin(Date.now() / 150 + i * .7)) * 16) + 'px'; }
+    else { b.classList.remove('lit'); b.style.height = (3 + Math.abs(Math.sin(i * 1.3)) * 12) + 'px'; }
   }
 }
 
-function toggleAudio(){
-  if(!sAudio){playCard();return;}
-  if(sAudio.paused){sAudio.play().then(()=>{sAudioPlaying=true;ppBtn('⏸');if(si<sq.length)startSAInt(sq[si].id);}).catch(()=>{});}
-  else{sAudio.pause();sAudioPlaying=false;ppBtn('▶');}
+function toggleAudio() {
+  if (!audioUnlocked) { unlockAudio(); return; }
+  if (!sAudio) { playCard(); return; }
+  if (sAudio.paused) { sAudio.play().then(() => { sAudioPlaying = true; ppBtn('⏸'); if (si < sq.length) startSAInt(sq[si].id); }).catch(() => {}); }
+  else { sAudio.pause(); sAudioPlaying = false; ppBtn('▶'); }
 }
-function stopSA(){clearInterval(sAudioInt);sAudioInt=null;if(sAudio){sAudio.pause();sAudio.src='';sAudio=null;}sAudioPlaying=false;}
-function ppBtn(txt){const b=document.getElementById('pp-btn');if(b)b.textContent=txt;}
 
-function showDone(){
-  const del=decisions.filter(d=>d.action==='delete'),keep=decisions.filter(d=>d.action==='keep');
-  document.getElementById('card-stack').innerHTML=`
+function stopSA() {
+  clearInterval(sAudioInt); sAudioInt = null;
+  if (sAudio) { sAudio.pause(); sAudio.src = ''; sAudio = null; }
+  sAudioPlaying = false;
+}
+
+function ppBtn(txt) { const b = document.getElementById('pp-btn'); if (b) b.textContent = txt; }
+
+function showDone() {
+  const del = decisions.filter(d => d.action === 'delete');
+  const keep = decisions.filter(d => d.action === 'keep');
+  document.getElementById('card-stack').innerHTML = `
     <div class="swipe-done">
       <div class="done-icon">✓</div>
-      <div class="done-title">Review complete</div>
-      <div class="done-sub">You reviewed ${decisions.length} tracks.</div>
+      <div class="done-title">Batch complete</div>
+      <div class="done-sub">${sessionRemoved} track${sessionRemoved !== 1 ? 's' : ''} removed this session.</div>
       <div class="done-stats">
-        <div class="sbox"><div class="snum" style="color:var(--red)">${del.length}</div><div class="slbl">Remove</div></div>
-        <div class="sbox"><div class="snum" style="color:var(--green)">${keep.length}</div><div class="slbl">Keep</div></div>
+        <div class="sbox"><div class="snum" style="color:var(--red)">${del.length}</div><div class="slbl">To remove</div></div>
+        <div class="sbox"><div class="snum" style="color:var(--green)">${keep.length}</div><div class="slbl">Kept</div></div>
       </div>
-      ${del.length?`<button class="btn-apply" onclick="applySwipeDel()">Remove ${del.length} track${del.length!==1?'s':''} from Spotify</button>`:'<div style="font-family:var(--mono);font-size:12px;color:var(--mid)">Nothing to remove!</div>'}
-      <button class="btn-startover" onclick="initSwipe()">Review another batch</button>
+      ${del.length ? `<button class="btn-apply" onclick="applySwipeDel()">Remove ${del.length} track${del.length!==1?'s':''} from Spotify</button>` : '<div style="font-family:var(--mono);font-size:12px;color:var(--mid);margin-bottom:12px">Nothing to remove!</div>'}
+      <button class="btn-startover" onclick="continueSwipe()">Keep swiping</button>
     </div>`;
-  document.querySelectorAll('.swipe-btn').forEach(b=>b.style.display='none');
+  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = 'none');
 }
 
-async function applySwipeDel(){
-  const del=decisions.filter(d=>d.action==='delete');
-  const ids=new Set(del.map(d=>d.track.id)),uris=del.map(d=>d.track.uri);
-  tracks=tracks.filter(t=>!ids.has(t.id));
+function continueSwipe() {
+  // Reshuffle remaining unreviewed tracks and continue
+  const reviewedIds = new Set(decisions.map(d => d.track.id));
+  const remaining = tracks.filter(t => !reviewedIds.has(t.id)).sort(() => Math.random() - .5);
+  if (!remaining.length) { toast('You\'ve reviewed all your tracks!'); return; }
+  sq = remaining; si = 0; decisions = [];
+  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = '');
+  document.getElementById('undo-btn').disabled = true;
+  buildCards(); updateSP(); setTimeout(playCard, 150);
+}
+
+async function applySwipeDel() {
+  const del = decisions.filter(d => d.action === 'delete');
+  if (!del.length) return;
+  const ids = new Set(del.map(d => d.track.id));
+  const uris = del.map(d => d.track.uri);
+  tracks = tracks.filter(t => !ids.has(t.id));
+  vFilteredCache = null;
   toast(`Removing ${del.length} track${del.length!==1?'s':''}…`);
-  try{await deleteFromSpotify(uris);toast(`Removed ${del.length} ✓`);}
-  catch(e){toast('Error removing — check connection');}
-  initSwipe();
+  try {
+    await deleteFromSpotify(uris);
+    toast(`Removed ${del.length} ✓`);
+    // Reset decisions but keep sessionRemoved counter
+    decisions = [];
+    continueSwipe();
+  } catch(e) {
+    toast('Error removing — check connection');
+    console.error(e);
+  }
 }
 
 // ── TOAST ──
