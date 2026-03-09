@@ -300,7 +300,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
       <div class="hdr-pill" id="tc-pill">—</div>
     </div>
   </div>
-  <div class="swrap"><span class="si">⌕</span><input type="text" id="t-search" placeholder="Search…" oninput="renderTracks()"></div>
+  <div class="swrap"><span class="si">⌕</span><input type="text" id="t-search" placeholder="Search songs or artists…" oninput="debouncedRenderTracks()"></div>
   <div class="fchips">
     <div class="chip active" onclick="setAge('all',this)">All</div>
     <div class="chip" onclick="setAge('old',this)">2+ yrs</div>
@@ -620,9 +620,10 @@ async function deleteFromSpotify(uris) {
       method: 'DELETE',
       body: JSON.stringify({ ids: batch })
     });
-    if (!res.ok && res.status !== 200 && res.status !== 204) {
-      const errBody = await res.json().catch(()=>({}));
-      throw new Error(`Delete failed: ${res.status} — ${errBody?.error?.message||''}`);
+    if (res.status !== 200 && res.status !== 204) {
+      let msg = `HTTP ${res.status}`;
+      try { const e = await res.json(); msg = e?.error?.message || msg; } catch(_){}
+      throw new Error(msg);
     }
   }
 }
@@ -703,6 +704,13 @@ function artEl(t, forSwipe) {
   return `<div style="width:100%;height:100%;background:${palettes[i]};display:flex;align-items:center;justify-content:center;font-size:${forSwipe?52:18}px;${forSwipe?'':'border-radius:8px'}">${emojis[i]}</div>`;
 }
 
+// ── DEBOUNCE ──
+let searchTimer = null;
+function debouncedRenderTracks() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { vFilteredCache = null; renderTracks(); }, 180);
+}
+
 // ── TRACKS RENDER ──
 function setAge(age, el) {
   ageFilter = age;
@@ -726,8 +734,14 @@ function filteredTracks() {
   if (vFilteredCache) return vFilteredCache;
   let r = tracks;
   if (ageFilter !== 'all') r = r.filter(t => getAge(t.added) === ageFilter);
-  const q = (document.getElementById('t-search')?.value||'').toLowerCase();
-  if (q) r = r.filter(t => t.name.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q));
+  const q = (document.getElementById('t-search')?.value||'').toLowerCase().trim();
+  if (q) {
+    const terms = q.split(/\s+/);
+    r = r.filter(t => {
+      const hay = (t.name + ' ' + t.artist + ' ' + t.album).toLowerCase();
+      return terms.every(term => hay.includes(term));
+    });
+  }
   vFilteredCache = r;
   return r;
 }
@@ -742,6 +756,8 @@ function renderTracks() {
   const content = document.getElementById('t-content');
 
   if (!ft.length) {
+    content.style.height = '';
+    content.style.position = '';
     content.innerHTML = `<div class="empty"><div class="empty-icon">♫</div><div class="empty-text">No tracks found</div><div class="empty-sub">Try a different filter</div></div>`;
     updateSelBars(); return;
   }
@@ -936,7 +952,28 @@ function updateSelBars() {
   });
 }
 
-// ── PREVIEW ──
+// ── PREVIEW URL FALLBACK ──
+// Spotify deprecated preview_url in Nov 2024. Fallback: scrape embed player.
+const previewCache = {};
+
+async function getPreviewUrl(track) {
+  if (track.preview_url) return track.preview_url;
+  if (previewCache[track.id] !== undefined) return previewCache[track.id];
+  try {
+    const res = await fetch(`https://open.spotify.com/embed/track/${track.id}`);
+    const html = await res.text();
+    const match = html.match(/"audioPreview"\s*:\s*\{"url"\s*:\s*"([^"]+)"/);
+    const url = match ? match[1] : null;
+    previewCache[track.id] = url;
+    track.preview_url = url; // cache on track object too
+    return url;
+  } catch(_) {
+    previewCache[track.id] = null;
+    return null;
+  }
+}
+
+// ── PREVIEW (songs + artists tabs) ──
 function togglePrev(e, id) {
   e.stopPropagation();
   if (lpId === id) { stopLP(); return; }
@@ -944,28 +981,37 @@ function togglePrev(e, id) {
   startLP(t);
 }
 
-function startLP(t) {
+async function startLP(t) {
   stopLP();
-  if (!t.preview_url) {
-    toast('No preview — Spotify removed this track\'s audio sample');
-    return;
-  }
   lpId = t.id; lpSec = 0;
   const page = currentTab === 'artists' ? 'a' : 't';
-  document.getElementById(`${page}-pbar`).classList.add('on');
-  document.getElementById(`${page}-pb-title`).textContent = `${t.name} — ${t.artist}`;
-  document.getElementById(`${page}-pb-fill`).style.width = '0%';
-  document.getElementById(`${page}-pb-time`).textContent = '0:10';
 
   document.querySelectorAll('.tart').forEach(el => { el.classList.remove('playing'); const ps = el.querySelector('.pov span'); if (ps) ps.textContent = '▶'; });
   document.querySelectorAll('.splay').forEach(el => { el.classList.remove('playing'); el.textContent = '▶'; });
   const ae = document.getElementById(`art-${t.id}`), se = document.getElementById(`splay-${t.id}`);
-  if (ae) { ae.classList.add('playing'); const ps = ae.querySelector('.pov span'); if (ps) ps.textContent = '⏹'; }
-  if (se) { se.classList.add('playing'); se.textContent = '⏹'; }
+  if (ae) { ae.classList.add('playing'); const ps = ae.querySelector('.pov span'); if (ps) ps.textContent = '…'; }
+  if (se) { se.classList.add('playing'); se.textContent = '…'; }
 
-  lpAudio = new Audio(t.preview_url);
+  document.getElementById(`${page}-pbar`).classList.add('on');
+  document.getElementById(`${page}-pb-title`).textContent = `${t.name} — ${t.artist}`;
+  document.getElementById(`${page}-pb-fill`).style.width = '0%';
+  document.getElementById(`${page}-pb-time`).textContent = '…';
+
+  const url = await getPreviewUrl(t);
+  if (lpId !== t.id) return; // cancelled while fetching
+
+  if (!url) {
+    toast('No preview available for this track');
+    stopLP(); return;
+  }
+
+  if (ae) { const ps = ae.querySelector('.pov span'); if (ps) ps.textContent = '⏹'; }
+  if (se) se.textContent = '⏹';
+  document.getElementById(`${page}-pb-time`).textContent = '0:10';
+
+  lpAudio = new Audio(url);
   lpAudio.volume = 0.72;
-  lpAudio.play().catch(() => { toast('Preview unavailable — try another track'); stopLP(); });
+  lpAudio.play().catch(() => { toast('Preview playback blocked — tap again'); stopLP(); });
   setTimeout(() => { if (lpAudio) { lpAudio.pause(); lpAudio = null; } }, 10000);
 
   lpInt = setInterval(() => {
@@ -1005,7 +1051,7 @@ async function confirmDel(){
   else if (currentTab === 'artists') renderArtists();
   toast(`Removing ${count} track${count!==1?'s':''}…`);
   try{ await deleteFromSpotify(uris); toast(`Removed ${count} track${count!==1?'s':''}  ✓`); }
-  catch(e){ toast('Error removing — check connection'); console.error(e); }
+  catch(e){ toast(`Error: ${e.message}`); console.error(e); }
 }
 
 // ── SWIPE ──
@@ -1151,16 +1197,19 @@ function updateSP() {
   document.getElementById('sp-fill').style.width = (sq.length ? si / sq.length * 100 : 0) + '%';
 }
 
-function playCard() {
+async function playCard() {
   if (si >= sq.length) return;
   const t = sq[si];
-  stopSA(); sAudioPos = 0; ppBtn('▶');
-  if (!t.preview_url) return;
-  sAudio = new Audio(t.preview_url);
+  stopSA(); sAudioPos = 0; ppBtn('…');
+  const url = await getPreviewUrl(t);
+  // Make sure we're still on the same card
+  if (!sq[si] || sq[si].id !== t.id) return;
+  if (!url) { ppBtn('▶'); return; }
+  sAudio = new Audio(url);
   sAudio.volume = 0.75;
   sAudio.play()
     .then(() => { sAudioPlaying = true; ppBtn('⏸'); startSAInt(t.id); })
-    .catch(() => { ppBtn('▶'); }); // silently fail if autoplay blocked
+    .catch(() => { ppBtn('▶'); });
   sAudio.onended = () => { sAudioPlaying = false; ppBtn('▶'); };
 }
 
@@ -1244,7 +1293,7 @@ async function applySwipeDel() {
     decisions = [];
     continueSwipe();
   } catch(e) {
-    toast('Error removing — check connection');
+    toast(`Error: ${e.message}`);
     console.error(e);
   }
 }
