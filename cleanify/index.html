@@ -248,6 +248,18 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 .empty-icon{font-size:38px;margin-bottom:10px;opacity:.4}
 .empty-text{font-size:15px;font-weight:700;color:var(--mid)}
 .empty-sub{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:5px}
+
+/* VIRTUAL SCROLL SPACER */
+.vspacer{pointer-events:none;flex-shrink:0}
+
+/* LOGOUT TAB — red danger styling */
+.tab-btn.logout-tab{flex:.65;color:#ff4455}
+.tab-btn.logout-tab .tab-icon{font-size:19px}
+
+/* LOGOUT MODAL */
+.logout-icon{font-size:44px;margin-bottom:12px;text-align:center}
+.btn-logout-confirm{padding:14px;border-radius:12px;border:1px solid rgba(255,68,85,.4);background:rgba(255,68,85,.12);color:#ff4455;font-family:var(--font);font-size:15px;font-weight:800;cursor:pointer;width:100%}
+.btn-logout-cancel{padding:14px;border-radius:12px;border:1px solid var(--border);background:var(--s2);color:var(--mid);font-family:var(--font);font-size:14px;font-weight:700;cursor:pointer;width:100%}
 </style>
 </head>
 <body>
@@ -371,8 +383,8 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
   <button class="tab-btn" id="tab-swipe" onclick="goTab('swipe')">
     <span class="tab-icon">✦</span><span>Swipe</span>
   </button>
-  <button class="tab-btn logout-tab" onclick="logout()">
-    <span class="tab-icon" style="font-size:17px">⏏</span><span>Out</span>
+  <button class="tab-btn logout-tab" onclick="confirmLogout()">
+    <span class="tab-icon">⏻</span><span>Logout</span>
   </button>
 </div>
 
@@ -385,6 +397,20 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
     <div class="macts">
       <button class="btn-mconfirm" onclick="confirmDel()">Yes, remove from Spotify</button>
       <button class="btn-mcancel" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- LOGOUT CONFIRM MODAL -->
+<div class="modal-ov" id="logout-modal" onclick="bgCloseLogout(event)">
+  <div class="msheet">
+    <div class="mhandle"></div>
+    <div class="logout-icon">⏻</div>
+    <div class="mtitle" style="text-align:center">Log out?</div>
+    <div class="msub" style="text-align:center">You'll need to reconnect your Spotify account to use Cleanify again.</div>
+    <div class="macts">
+      <button class="btn-logout-confirm" onclick="logout()">Yes, log out</button>
+      <button class="btn-logout-cancel" onclick="closeLogoutModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -513,9 +539,21 @@ async function ensureToken() {
   return tryRefresh();
 }
 
+function confirmLogout() {
+  document.getElementById('logout-modal').classList.add('open');
+}
+function closeLogoutModal() {
+  document.getElementById('logout-modal').classList.remove('open');
+}
+function bgCloseLogout(e) {
+  if (e.target === document.getElementById('logout-modal')) closeLogoutModal();
+}
+
 function logout() {
+  closeLogoutModal();
   ['sp_token','sp_expiry','sp_refresh'].forEach(k => localStorage.removeItem(k));
   accessToken = null; tracks = []; isAuthed = false;
+  vFilteredCache = null;
   stopLP(); stopSA();
   document.getElementById('tab-bar').classList.add('hidden');
   showPage('page-login');
@@ -630,7 +668,7 @@ function goTab(tab) {
   const map = { songs:'page-tracks', artists:'page-artists', swipe:'page-swipe' };
   showPage(map[tab] || 'page-tracks');
   stopLP(); stopSA();
-  if (tab === 'songs') renderTracks();
+  if (tab === 'songs') { vFilteredCache = null; renderTracks(); }
   if (tab === 'artists') renderArtists();
   if (tab === 'swipe') initSwipe();
 }
@@ -676,38 +714,104 @@ function setAge(age, el) {
   renderTracks();
 }
 
+// ── VIRTUAL SCROLL — TRACKS ──
+const VROW_H = 70; // px per track row (matches padding + border)
+let vScrollEl = null, vRenderFrame = null;
+let vFilteredCache = null, vFilterKey = '';
+
+function getFilterKey() {
+  return ageFilter + '|' + (document.getElementById('t-search')?.value||'');
+}
+
 function filteredTracks() {
-  let r = [...tracks];
+  const key = getFilterKey();
+  if (key !== vFilterKey) { vFilteredCache = null; vFilterKey = key; }
+  if (vFilteredCache) return vFilteredCache;
+  let r = tracks;
   if (ageFilter !== 'all') r = r.filter(t => getAge(t.added) === ageFilter);
-  const q = document.getElementById('t-search').value.toLowerCase();
+  const q = (document.getElementById('t-search')?.value||'').toLowerCase();
   if (q) r = r.filter(t => t.name.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q));
+  vFilteredCache = r;
   return r;
 }
 
 function renderTracks() {
+  vFilteredCache = null; // invalidate cache on explicit render call
   const ft = filteredTracks();
   document.getElementById('tc-pill').textContent = `${tracks.length} tracks`;
   document.getElementById('t-sec').textContent = `${ft.length} songs`;
-  const c = document.getElementById('t-content');
+
+  const scrollEl = document.getElementById('t-scroll');
+  const content = document.getElementById('t-content');
+
   if (!ft.length) {
-    c.innerHTML = `<div class="empty"><div class="empty-icon">♫</div><div class="empty-text">No tracks found</div><div class="empty-sub">Try a different filter</div></div>`;
-  } else {
-    c.innerHTML = ft.map((t, i) => `
-      <div class="track-row ${t.selected?'selected':''}" id="row-${t.id}" onclick="toggleSel('${esc(t.id)}')" style="animation-delay:${Math.min(i*.014,.35)}s">
-        <div class="chkbox" id="cb-${t.id}">${t.selected?chkSvg(12,9):''}</div>
-        <div class="tart ${lpId===t.id?'playing':''}" id="art-${t.id}" onclick="togglePrev(event,'${esc(t.id)}')">
-          ${artEl(t,false)}
-          <div class="pring"></div>
-          <div class="pov"><span style="color:#fff;font-size:12px">${lpId===t.id?'⏹':'▶'}</span></div>
-        </div>
-        <div class="tinfo">
-          <div class="tname">${esc(t.name)}</div>
-          <div class="tsub">${esc(t.artist)} · ${esc(t.album)}</div>
-        </div>
-        ${ageBadge(t.added)}
-      </div>`).join('');
+    content.innerHTML = `<div class="empty"><div class="empty-icon">♫</div><div class="empty-text">No tracks found</div><div class="empty-sub">Try a different filter</div></div>`;
+    updateSelBars(); return;
   }
+
+  // Set total height so scrollbar is correct
+  content.style.position = 'relative';
+  content.style.height = (ft.length * VROW_H) + 'px';
+
+  // Remove old listener, add new
+  if (vScrollEl) vScrollEl.removeEventListener('scroll', onVScroll);
+  vScrollEl = scrollEl;
+  vScrollEl.addEventListener('scroll', onVScroll, {passive:true});
+
+  paintVRows(ft, scrollEl, content);
   updateSelBars();
+}
+
+function onVScroll() {
+  if (vRenderFrame) return;
+  vRenderFrame = requestAnimationFrame(() => {
+    vRenderFrame = null;
+    const ft = filteredTracks();
+    const scrollEl = document.getElementById('t-scroll');
+    const content = document.getElementById('t-content');
+    if (scrollEl && content) paintVRows(ft, scrollEl, content);
+  });
+}
+
+function paintVRows(ft, scrollEl, content) {
+  const OVERSCAN = 5;
+  const scrollTop = scrollEl.scrollTop;
+  const viewH = scrollEl.clientHeight;
+  const startIdx = Math.max(0, Math.floor(scrollTop / VROW_H) - OVERSCAN);
+  const endIdx = Math.min(ft.length - 1, Math.ceil((scrollTop + viewH) / VROW_H) + OVERSCAN);
+
+  // Remove rows outside window
+  const existing = content.querySelectorAll('.track-row[data-idx]');
+  existing.forEach(el => {
+    const idx = parseInt(el.dataset.idx);
+    if (idx < startIdx || idx > endIdx) el.remove();
+  });
+
+  // Add rows in window
+  for (let i = startIdx; i <= endIdx; i++) {
+    if (content.querySelector(`.track-row[data-idx="${i}"]`)) continue;
+    const t = ft[i];
+    const row = document.createElement('div');
+    row.className = 'track-row' + (t.selected ? ' selected' : '');
+    row.id = 'row-' + t.id;
+    row.dataset.idx = i;
+    row.style.cssText = `position:absolute;left:0;right:0;top:${i*VROW_H}px;animation:none`;
+    row.innerHTML = `
+      <div class="chkbox" id="cb-${t.id}">${t.selected?chkSvg(12,9):''}</div>
+      <div class="tart ${lpId===t.id?'playing':''}" id="art-${t.id}">
+        ${artEl(t,false)}
+        <div class="pring"></div>
+        <div class="pov"><span style="color:#fff;font-size:12px">${lpId===t.id?'⏹':'▶'}</span></div>
+      </div>
+      <div class="tinfo">
+        <div class="tname">${esc(t.name)}</div>
+        <div class="tsub">${esc(t.artist)} · ${esc(t.album)}</div>
+      </div>
+      ${ageBadge(t.added)}`;
+    row.addEventListener('click', () => toggleSel(t.id));
+    row.querySelector('.tart').addEventListener('click', e => { e.stopPropagation(); togglePrev(e, t.id); });
+    content.appendChild(row);
+  }
 }
 
 // ── ARTISTS RENDER ──
@@ -759,14 +863,39 @@ function renderArtists() {
 function toggleSel(id) {
   const t = tracks.find(t=>t.id===id); if(!t) return;
   t.selected = !t.selected;
-  // fast DOM update for track row
+  vFilteredCache = null; // invalidate so virtual scroll reflects selection
+
+  // fast DOM update for track row (virtual scroll)
   const row = document.getElementById(`row-${id}`);
-  if (row) { row.classList.toggle('selected',t.selected); const cb=document.getElementById(`cb-${id}`); if(cb){cb.style.background=t.selected?'var(--green)':'';cb.style.borderColor=t.selected?'var(--green)':'';cb.innerHTML=t.selected?chkSvg(12,9):'';} }
-  // artist row
+  if (row) {
+    row.classList.toggle('selected', t.selected);
+    const cb = document.getElementById(`cb-${id}`);
+    if (cb) { cb.style.background=t.selected?'var(--green)':''; cb.style.borderColor=t.selected?'var(--green)':'var(--border)'; cb.innerHTML=t.selected?chkSvg(12,9):''; }
+  }
+  // artist row fast update (no full re-render)
   const arow = document.getElementById(`arow-${id}`);
-  if (arow) { arow.classList.toggle('selected',t.selected); const sc=document.getElementById(`sc-${id}`); if(sc){sc.style.background=t.selected?'var(--green)':'';sc.style.borderColor=t.selected?'var(--green)':'';sc.innerHTML=t.selected?chkSvg(10,7):'';} }
+  if (arow) {
+    arow.classList.toggle('selected', t.selected);
+    const sc = document.getElementById(`sc-${id}`);
+    if (sc) { sc.style.background=t.selected?'var(--green)':''; sc.style.borderColor=t.selected?'var(--green)':'var(--border)'; sc.innerHTML=t.selected?chkSvg(10,7):''; }
+    // update artist card meta text only
+    const artistName = t.artist;
+    const artistTracks = tracks.filter(tt=>tt.artist===artistName);
+    const allSel = artistTracks.every(tt=>tt.selected);
+    const someSel = artistTracks.some(tt=>tt.selected);
+    const card = arow.closest('.acard');
+    if (card) {
+      card.classList.toggle('selall', allSel);
+      const aname = card.querySelector('.aname');
+      if (aname) aname.style.color = allSel ? 'var(--green)' : 'var(--text)';
+      const ameta = card.querySelector('.ameta');
+      const selCount = artistTracks.filter(tt=>tt.selected).length;
+      if (ameta) ameta.textContent = `${artistTracks.length} songs${someSel&&!allSel?' · '+selCount+' selected':allSel?' · all selected':''}`;
+      const aselb = card.querySelector('.aselb');
+      if (aselb) aselb.classList.toggle('on', allSel);
+    }
+  }
   updateSelBars();
-  if (currentTab==='artists') renderArtists(); // refresh meta text
 }
 
 function toggleArtistSel(e, artist) {
@@ -792,7 +921,9 @@ function selectAllTracks() {
 
 function clearSel() {
   tracks.forEach(t=>t.selected=false);
-  renderTracks(); renderArtists();
+  vFilteredCache = null;
+  if (currentTab === 'songs') renderTracks();
+  else if (currentTab === 'artists') renderArtists();
 }
 
 function selTracks() { return tracks.filter(t=>t.selected); }
@@ -825,18 +956,19 @@ function startLP(t) {
   document.getElementById(`${page}-pb-fill`).style.width = '0%';
   document.getElementById(`${page}-pb-time`).textContent = '0:10';
 
-  document.querySelectorAll('.tart').forEach(el=>{el.classList.remove('playing');el.querySelector('.pov span') && (el.querySelector('.pov span').textContent='▶');});
+  document.querySelectorAll('.tart').forEach(el=>{el.classList.remove('playing');const ps=el.querySelector('.pov span');if(ps)ps.textContent='▶';});
   document.querySelectorAll('.splay').forEach(el=>{el.classList.remove('playing');el.textContent='▶';});
   const ae=document.getElementById(`art-${t.id}`), se=document.getElementById(`splay-${t.id}`);
   if(ae){ae.classList.add('playing');const ps=ae.querySelector('.pov span');if(ps)ps.textContent='⏹';}
   if(se){se.classList.add('playing');se.textContent='⏹';}
 
-  if(t.preview_url){
-    try{
-      lpAudio=new Audio();lpAudio.crossOrigin='anonymous';lpAudio.src=t.preview_url;lpAudio.volume=.72;
-      lpAudio.play().catch(()=>{});
-      setTimeout(()=>{if(lpAudio)lpAudio.pause();},10000);
-    }catch(e){}
+  if (t.preview_url) {
+    lpAudio = new Audio(t.preview_url);
+    lpAudio.volume = 0.72;
+    lpAudio.play().catch(() => { toast('Preview unavailable for this track'); });
+    setTimeout(() => { if (lpAudio) { lpAudio.pause(); lpAudio = null; } }, 10000);
+  } else {
+    toast('No preview available');
   }
 
   lpInt = setInterval(()=>{
@@ -870,7 +1002,10 @@ async function confirmDel(){
   const sel=selTracks(),count=sel.length,uris=sel.map(t=>t.uri);
   const ids=new Set(sel.map(t=>t.id));
   tracks=tracks.filter(t=>!ids.has(t.id));
-  stopLP(); renderTracks(); renderArtists();
+  vFilteredCache = null;
+  stopLP();
+  if (currentTab === 'songs') renderTracks();
+  else if (currentTab === 'artists') renderArtists();
   toast(`Removing ${count} track${count!==1?'s':''}…`);
   try{ await deleteFromSpotify(uris); toast(`Removed ${count} track${count!==1?'s':''}  ✓`); }
   catch(e){ toast('Error removing — check connection'); console.error(e); }
@@ -980,11 +1115,10 @@ function playCard(){
   if(si>=sq.length)return;
   const t=sq[si];stopSA();sAudioPos=0;ppBtn('▶');
   if(!t.preview_url)return;
-  try{
-    sAudio=new Audio();sAudio.crossOrigin='anonymous';sAudio.src=t.preview_url;sAudio.volume=.75;
-    sAudio.play().then(()=>{sAudioPlaying=true;ppBtn('⏸');startSAInt(t.id);}).catch(()=>ppBtn('▶'));
-    sAudio.onended=()=>{sAudioPlaying=false;ppBtn('▶');};
-  }catch(e){sAudio=null;}
+  sAudio = new Audio(t.preview_url);
+  sAudio.volume = 0.75;
+  sAudio.play().then(()=>{sAudioPlaying=true;ppBtn('⏸');startSAInt(t.id);}).catch(()=>ppBtn('▶'));
+  sAudio.onended=()=>{sAudioPlaying=false;ppBtn('▶');};
 }
 
 function startSAInt(tid){
