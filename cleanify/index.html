@@ -573,7 +573,7 @@ function logout() {
 }
 
 // ── API ──
-async function api(url, opts = {}, _retries = 0) {
+async function api(url, opts = {}, _retry = 0) {
   await ensureToken();
   const res = await fetch(url, {
     ...opts,
@@ -582,7 +582,7 @@ async function api(url, opts = {}, _retries = 0) {
   if (res.status === 429) {
     const wait = parseInt(res.headers.get('Retry-After') || '2') * 1000;
     await new Promise(r => setTimeout(r, wait));
-    return api(url, opts, _retries + 1);
+    return api(url, opts, _retry + 1);
   }
   if (res.status === 401) {
     if (await tryRefresh()) return api(url, opts);
@@ -624,14 +624,13 @@ async function loadLibrary() {
       url = data.next;
       if (url) {
         setLoad(`Loading your Liked Songs…`, `${tracks.length} loaded so far…`);
-        await new Promise(r => setTimeout(r, 100)); // avoid 429
+        await new Promise(r => setTimeout(r, 100)); // avoid 429 rate limits
       }
     }
     isAuthed = true;
-    window._skippedItems = skipped;
     document.getElementById('tab-bar').classList.remove('hidden');
     goTab('songs');
-    if (skipped > 0) setTimeout(() => toast(`${skipped} local files / podcasts not shown (can't be removed via API)`), 1200);
+    if (skipped > 0) setTimeout(() => toast(`${skipped} local files/podcasts hidden — can't be removed via API`), 1200);
   } catch(e) {
     console.error(e);
     setLoad('Failed to load', e.message);
@@ -641,16 +640,15 @@ async function loadLibrary() {
 
 async function deleteFromSpotify(uris) {
   const BATCH = 50;
-  // Filter out local files — Spotify API cannot delete these
-  const ids = uris
-    .filter(u => !u.startsWith('spotify:local:'))
-    .map(u => u.replace('spotify:track:',''));
-  if (!ids.length) return;
-  for (let i = 0; i < ids.length; i += BATCH) {
-    const batch = ids.slice(i, i + BATCH);
-    const res = await api('https://api.spotify.com/v1/me/tracks', {
+  // Filter local files — they can't be removed via API
+  const validUris = uris.filter(u => u && u.startsWith('spotify:track:'));
+  if (!validUris.length) return;
+  for (let i = 0; i < validUris.length; i += BATCH) {
+    const batch = validUris.slice(i, i + BATCH);
+    // Feb/Mar 2026: Spotify replaced DELETE /me/tracks with DELETE /me/library (uses URIs not IDs)
+    const res = await api('https://api.spotify.com/v1/me/library', {
       method: 'DELETE',
-      body: JSON.stringify({ ids: batch })
+      body: JSON.stringify({ uris: batch })
     });
     if (res.status !== 200 && res.status !== 204) {
       let msg = `HTTP ${res.status}`;
@@ -1348,6 +1346,7 @@ async function applySwipeDel() {
   try {
     await deleteFromSpotify(uris);
     toast(`Removed ${del.length} ✓`);
+    // Reset decisions but keep sessionRemoved counter
     decisions = [];
     continueSwipe();
   } catch(e) {
