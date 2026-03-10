@@ -639,16 +639,16 @@ async function loadLibrary() {
 }
 
 async function deleteFromSpotify(uris) {
-  const BATCH = 50;
+  const BATCH = 40; // /me/library max is 40
   // Filter local files — they can't be removed via API
   const validUris = uris.filter(u => u && u.startsWith('spotify:track:'));
   if (!validUris.length) return;
   for (let i = 0; i < validUris.length; i += BATCH) {
     const batch = validUris.slice(i, i + BATCH);
-    // Feb/Mar 2026: Spotify replaced DELETE /me/tracks with DELETE /me/library (uses URIs not IDs)
-    const res = await api('https://api.spotify.com/v1/me/library', {
-      method: 'DELETE',
-      body: JSON.stringify({ uris: batch })
+    // Mar 2026: DELETE /me/library uses URIs as query param (not body)
+    const uriParam = batch.map(encodeURIComponent).join(',');
+    const res = await api(`https://api.spotify.com/v1/me/library?uris=${uriParam}`, {
+      method: 'DELETE'
     });
     if (res.status !== 200 && res.status !== 204) {
       let msg = `HTTP ${res.status}`;
