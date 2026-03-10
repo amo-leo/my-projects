@@ -573,12 +573,17 @@ function logout() {
 }
 
 // ── API ──
-async function api(url, opts = {}) {
+async function api(url, opts = {}, _retries = 0) {
   await ensureToken();
   const res = await fetch(url, {
     ...opts,
     headers: { Authorization:`Bearer ${accessToken}`, 'Content-Type':'application/json', ...(opts.headers||{}) }
   });
+  if (res.status === 429) {
+    const wait = parseInt(res.headers.get('Retry-After') || '2') * 1000;
+    await new Promise(r => setTimeout(r, wait));
+    return api(url, opts, _retries + 1);
+  }
   if (res.status === 401) {
     if (await tryRefresh()) return api(url, opts);
     logout(); throw new Error('Session expired');
@@ -591,13 +596,18 @@ async function loadLibrary() {
   setLoad('Loading your Liked Songs…','');
   tracks = [];
   let url = 'https://api.spotify.com/v1/me/tracks?limit=50';
+  let skipped = 0;
   try {
     while (url) {
       const res = await api(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       for (const item of (data.items||[])) {
-        if (!item?.track || item.track.type !== 'track') continue;
+        if (!item?.track) { skipped++; continue; }
+        // Skip local files (can't be deleted via API) and non-tracks
+        if (item.track.uri?.startsWith('spotify:local:') || item.track.type !== 'track') {
+          skipped++; continue;
+        }
         const t = item.track;
         tracks.push({
           id: t.id, uri: t.uri,
@@ -612,11 +622,16 @@ async function loadLibrary() {
         });
       }
       url = data.next;
-      if (url) setLoad(`Loading your Liked Songs…`, `${tracks.length} loaded so far…`);
+      if (url) {
+        setLoad(`Loading your Liked Songs…`, `${tracks.length} loaded so far…`);
+        await new Promise(r => setTimeout(r, 100)); // avoid 429
+      }
     }
     isAuthed = true;
+    window._skippedItems = skipped;
     document.getElementById('tab-bar').classList.remove('hidden');
     goTab('songs');
+    if (skipped > 0) setTimeout(() => toast(`${skipped} local files / podcasts not shown (can't be removed via API)`), 1200);
   } catch(e) {
     console.error(e);
     setLoad('Failed to load', e.message);
@@ -626,19 +641,20 @@ async function loadLibrary() {
 
 async function deleteFromSpotify(uris) {
   const BATCH = 50;
-  const ids = uris.map(u => u.replace('spotify:track:',''));
+  // Filter out local files — Spotify API cannot delete these
+  const ids = uris
+    .filter(u => !u.startsWith('spotify:local:'))
+    .map(u => u.replace('spotify:track:',''));
+  if (!ids.length) return;
   for (let i = 0; i < ids.length; i += BATCH) {
     const batch = ids.slice(i, i + BATCH);
     const res = await api('https://api.spotify.com/v1/me/tracks', {
       method: 'DELETE',
       body: JSON.stringify({ ids: batch })
     });
-    if (res.status === 403) {
-      throw new Error('403_SCOPE');
-    }
     if (res.status !== 200 && res.status !== 204) {
       let msg = `HTTP ${res.status}`;
-      try { const e = await res.json(); msg = e?.error?.message || msg; } catch(_){}
+      try { const body = await res.json(); msg = body?.error?.message || msg; console.error('Spotify delete error:', body); } catch(_){}
       throw new Error(msg);
     }
   }
@@ -1092,12 +1108,8 @@ async function confirmDel(){
     await deleteFromSpotify(uris);
     toast(`Removed ${count} track${count!==1?'s':''}  ✓`);
   } catch(e) {
-    if (e.message === '403_SCOPE') {
-      showScopeError();
-    } else {
-      toast(`Error: ${e.message}`);
-      console.error(e);
-    }
+    toast(`Could not remove: ${e.message}`);
+    console.error(e);
   }
 }
 
@@ -1336,21 +1348,12 @@ async function applySwipeDel() {
   try {
     await deleteFromSpotify(uris);
     toast(`Removed ${del.length} ✓`);
-    // Reset decisions but keep sessionRemoved counter
     decisions = [];
     continueSwipe();
   } catch(e) {
-    if (e.message === '403_SCOPE') showScopeError();
-    else { toast(`Error: ${e.message}`); console.error(e); }
+    toast(`Could not remove: ${e.message}`);
+    console.error(e);
   }
-}
-
-function showScopeError() {
-  // Clear existing token so next login re-grants all scopes
-  ['sp_token','sp_expiry','sp_refresh'].forEach(k => localStorage.removeItem(k));
-  accessToken = null;
-  // Show modal
-  document.getElementById('scope-modal').classList.add('open');
 }
 
 // ── TOAST ──
