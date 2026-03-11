@@ -193,6 +193,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 .snum{font-size:28px;font-weight:800}
 .slbl{font-family:var(--mono);font-size:10px;color:var(--mid);margin-top:2px;letter-spacing:1px;text-transform:uppercase}
 .btn-apply{padding:14px 32px;border-radius:12px;border:1px solid rgba(255,68,85,.3);background:var(--rdim);color:var(--red);font-family:var(--font);font-size:14px;font-weight:800;cursor:pointer;width:100%}
+.btn-apply-now{padding:5px 12px;border-radius:20px;border:1px solid rgba(255,68,85,.4);background:var(--rdim);color:var(--red);font-family:var(--mono);font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap}
 .btn-startover{padding:12px 24px;border-radius:12px;border:1px solid var(--border);background:var(--s2);color:var(--mid);font-family:var(--font);font-size:13px;font-weight:700;cursor:pointer;width:100%}
 
 /* LOGIN */
@@ -305,7 +306,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
     <div class="chip active" onclick="setAge('all',this)">All</div>
     <div class="chip" onclick="setAge('old',this)">2+ yrs</div>
     <div class="chip" onclick="setAge('med',this)">1–2 yrs</div>
-    <div class="chip" onclick="setAge('new',this)">Recent</div>
+
   </div>
   <div class="pbar" id="t-pbar">
     <span style="font-size:13px">▶</span>
@@ -359,16 +360,15 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 <div class="page" id="page-swipe">
   <div class="swipe-hdr">
     <div class="swipe-title">✦ Swipe</div>
-    <div class="sppill" id="sp-label">0 / 0</div>
+    <div class="sppill" id="sp-label">0 removed</div>
   </div>
   <div class="sprogbar"><div class="sprogfill" id="sp-fill" style="width:0%"></div></div>
-  <div class="swipe-info"><span>✦</span> Swipe ← remove &nbsp;·&nbsp; → keep &nbsp;·&nbsp; tap ▶ to preview</div>
   <div class="card-stack" id="card-stack"></div>
   <div class="swipe-acts" id="swipe-acts">
     <button class="swipe-btn btn-undo" id="undo-btn" onclick="undoSwipe()" disabled>↩</button>
-    <button class="swipe-btn btn-del" onclick="doSwipe('delete')">✕</button>
+    <button class="swipe-btn btn-del" onclick="doSwipe('delete')">🗑</button>
     <button class="swipe-btn btn-pp" id="pp-btn" onclick="toggleAudio()">▶</button>
-    <button class="swipe-btn btn-keep" onclick="doSwipe('keep')">♥</button>
+    <button class="swipe-btn btn-keep" onclick="doSwipe('keep')">✓</button>
   </div>
 </div>
 
@@ -470,7 +470,7 @@ let lpId = null, lpInt = null, lpSec = 0, lpAudio = null;
 let activePbarPage = 'tracks'; // which page's preview bar to use
 
 // Swipe state
-let sq = [], si = 0, decisions = [];
+let sq = [], si = 0;
 let sAudio = null, sAudioPlaying = false, sAudioInt = null, sAudioPos = 0;
 
 // ── PKCE ──
@@ -1112,29 +1112,26 @@ async function confirmDel(){
 }
 
 // ── SWIPE ──
-// sq = full shuffled queue (all tracks), si = current index
-// decisions = [{track, action}] for this session
-// sessionRemoved = total removed so far this session (persists across "review more" clicks)
+// Swipe state
 let sessionRemoved = 0;
-let audioUnlocked = false; // iOS requires a user gesture to unlock audio
+let lastDeleted = null; // single undo slot
+let audioUnlocked = false;
 
 function initSwipe(fresh) {
   stopSA();
   if (fresh || sq.length === 0) {
     sq = [...tracks].sort(() => Math.random() - .5);
-    si = 0; decisions = []; sessionRemoved = 0;
+    si = 0; sessionRemoved = 0; lastDeleted = null;
   }
   document.getElementById('undo-btn').disabled = true;
-  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = '');
   buildCards(); updateSP();
-  // Attempt autoplay — will work if audio already unlocked by prior gesture
   setTimeout(playCard, 150);
 }
 
 function buildCards() {
   const s = document.getElementById('card-stack');
   s.innerHTML = '';
-  if (si >= sq.length) { showDone(); return; }
+  if (si >= sq.length) { sq = [...tracks].sort(() => Math.random() - .5); si = 0; }
   // Show current + next card (peek behind)
   for (let i = Math.min(si + 1, sq.length - 1); i >= si; i--) {
     const t = sq[i], front = i === si;
@@ -1221,11 +1218,33 @@ function animOut(card, dir, cb) {
 }
 
 function commit(action, track) {
-  decisions.push({track, action});
   si++;
-  if (action === 'delete') sessionRemoved++;
-  document.getElementById('undo-btn').disabled = false;
-  buildCards(); updateSP(); stopSA();
+  stopSA();
+  if (action === 'delete') {
+    // Instantly remove from local list and fire API
+    tracks = tracks.filter(t => t.id !== track.id);
+    vFilteredCache = null;
+    sessionRemoved++;
+    lastDeleted = track;
+    document.getElementById('undo-btn').disabled = false;
+    deleteFromSpotify([track.uri])
+      .then(() => toast(`"${track.name}" deleted ✓`))
+      .catch(e => {
+        // Rollback local removal on failure
+        tracks.push(track);
+        vFilteredCache = null;
+        sessionRemoved = Math.max(0, sessionRemoved - 1);
+        lastDeleted = null;
+        document.getElementById('undo-btn').disabled = !lastDeleted;
+        toast(`Could not delete: ${e.message}`);
+      });
+  }
+  // Reshuffle if we've gone through everything
+  if (si >= sq.length) {
+    sq = tracks.sort(() => Math.random() - .5);
+    si = 0;
+  }
+  buildCards(); updateSP();
   setTimeout(playCard, 80);
 }
 
@@ -1238,19 +1257,27 @@ function doSwipe(action) {
   else commit(action, t);
 }
 
-function undoSwipe() {
-  if (!decisions.length) return;
-  const last = decisions.pop();
-  if (last.action === 'delete') sessionRemoved = Math.max(0, sessionRemoved - 1);
-  si = Math.max(0, si - 1);
-  if (!decisions.length) document.getElementById('undo-btn').disabled = true;
-  stopSA(); buildCards(); updateSP(); setTimeout(playCard, 80); toast('Went back ↩');
+async function undoSwipe() {
+  if (!lastDeleted) return;
+  const track = lastDeleted;
+  lastDeleted = null;
+  document.getElementById('undo-btn').disabled = true;
+  try {
+    // Re-save track to Spotify library
+    await api('https://api.spotify.com/v1/me/library?uris=' + encodeURIComponent(track.uri), { method: 'PUT' });
+    // Add back to local list
+    tracks.push(track);
+    vFilteredCache = null;
+    sessionRemoved = Math.max(0, sessionRemoved - 1);
+    updateSP();
+    toast(`"${track.name}" restored ↩`);
+  } catch(e) {
+    toast(`Could not restore: ${e.message}`);
+  }
 }
 
 function updateSP() {
-  const remaining = sq.length - si;
-  document.getElementById('sp-label').textContent = `${sessionRemoved} removed · ${remaining} left`;
-  // Progress bar shows how far through the queue we are
+  document.getElementById('sp-label').textContent = `${sessionRemoved} removed`;
   document.getElementById('sp-fill').style.width = (sq.length ? si / sq.length * 100 : 0) + '%';
 }
 
@@ -1306,54 +1333,6 @@ function stopSA() {
 
 function ppBtn(txt) { const b = document.getElementById('pp-btn'); if (b) b.textContent = txt; }
 
-function showDone() {
-  const del = decisions.filter(d => d.action === 'delete');
-  const keep = decisions.filter(d => d.action === 'keep');
-  document.getElementById('card-stack').innerHTML = `
-    <div class="swipe-done">
-      <div class="done-icon">✓</div>
-      <div class="done-title">Batch complete</div>
-      <div class="done-sub">${sessionRemoved} track${sessionRemoved !== 1 ? 's' : ''} removed this session.</div>
-      <div class="done-stats">
-        <div class="sbox"><div class="snum" style="color:var(--red)">${del.length}</div><div class="slbl">To remove</div></div>
-        <div class="sbox"><div class="snum" style="color:var(--green)">${keep.length}</div><div class="slbl">Kept</div></div>
-      </div>
-      ${del.length ? `<button class="btn-apply" onclick="applySwipeDel()">Remove ${del.length} track${del.length!==1?'s':''} from Spotify</button>` : '<div style="font-family:var(--mono);font-size:12px;color:var(--mid);margin-bottom:12px">Nothing to remove!</div>'}
-      <button class="btn-startover" onclick="continueSwipe()">Keep swiping</button>
-    </div>`;
-  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = 'none');
-}
-
-function continueSwipe() {
-  // Reshuffle remaining unreviewed tracks and continue
-  const reviewedIds = new Set(decisions.map(d => d.track.id));
-  const remaining = tracks.filter(t => !reviewedIds.has(t.id)).sort(() => Math.random() - .5);
-  if (!remaining.length) { toast('You\'ve reviewed all your tracks!'); return; }
-  sq = remaining; si = 0; decisions = [];
-  document.querySelectorAll('.swipe-btn').forEach(b => b.style.display = '');
-  document.getElementById('undo-btn').disabled = true;
-  buildCards(); updateSP(); setTimeout(playCard, 150);
-}
-
-async function applySwipeDel() {
-  const del = decisions.filter(d => d.action === 'delete');
-  if (!del.length) return;
-  const ids = new Set(del.map(d => d.track.id));
-  const uris = del.map(d => d.track.uri);
-  tracks = tracks.filter(t => !ids.has(t.id));
-  vFilteredCache = null;
-  toast(`Removing ${del.length} track${del.length!==1?'s':''}…`);
-  try {
-    await deleteFromSpotify(uris);
-    toast(`Removed ${del.length} ✓`);
-    // Reset decisions but keep sessionRemoved counter
-    decisions = [];
-    continueSwipe();
-  } catch(e) {
-    toast(`Could not remove: ${e.message}`);
-    console.error(e);
-  }
-}
 
 // ── TOAST ──
 let tT;
