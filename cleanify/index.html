@@ -567,6 +567,7 @@ function bgCloseLogout(e) {
 function logout() {
   closeLogoutModal();
   ['sp_token','sp_expiry','sp_refresh'].forEach(k => localStorage.removeItem(k));
+  clearCache();
   accessToken = null; tracks = []; isAuthed = false;
   vFilteredCache = null;
   stopLP(); stopSA();
@@ -595,17 +596,48 @@ async function api(url, opts = {}, _retry = 0) {
   return res;
 }
 
-async function loadLibrary() {
+// ── SESSION CACHE ──
+// Stores tracks for the lifetime of the browser tab.
+// sessionStorage clears automatically when the tab/browser closes,
+// so users always get a fresh fetch on their first open each day.
+const CACHE_KEY = 'cleanify_tracks_v1';
+
+function saveCache(data) {
+  try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch(_){}
+}
+function loadCache() {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Restore Date objects (JSON serialises them as strings)
+    return parsed.map(t => ({ ...t, added: new Date(t.added) }));
+  } catch(_) { return null; }
+}
+function clearCache() {
+  try { sessionStorage.removeItem(CACHE_KEY); } catch(_){}
+}
+
+async function loadLibrary(forceRefresh = false) {
+  // Try cache first (unless forced refresh)
+  if (!forceRefresh) {
+    const cached = loadCache();
+    if (cached && cached.length > 0) {
+      tracks = cached;
+      isAuthed = true;
+      document.getElementById('tab-bar').classList.remove('hidden');
+      goTab('songs');
+      return; // done — no API call needed
+    }
+  }
+
   showPage('page-loading');
   setLoad('Loading your Liked Songs…','');
   tracks = [];
   let url = 'https://api.spotify.com/v1/me/tracks?limit=50';
   let skipped = 0;
-  let page = 0;
   try {
     while (url) {
-      page++;
-      // Per-request timeout of 15s so a stalled fetch surfaces as an error
       const controller = new AbortController();
       const tId = setTimeout(() => controller.abort(), 15000);
       let res;
@@ -641,9 +673,10 @@ async function loadLibrary() {
       url = data.next;
       if (url) {
         setLoad(`Loading your Liked Songs…`, `${tracks.length} loaded so far…`);
-        await new Promise(r => setTimeout(r, 50)); // small pause to avoid 429
+        await new Promise(r => setTimeout(r, 50));
       }
     }
+    saveCache(tracks);
     isAuthed = true;
     document.getElementById('tab-bar').classList.remove('hidden');
     goTab('songs');
@@ -652,9 +685,13 @@ async function loadLibrary() {
     console.error('loadLibrary failed:', e);
     const msg = e.name === 'AbortError' ? 'Request timed out — check connection' : e.message;
     setLoad('Failed to load :(', msg);
-    // Show the error for 5s then go back to login
     setTimeout(() => { showPage('page-login'); }, 5000);
   }
+}
+
+async function refreshLibrary() {
+  clearCache();
+  await loadLibrary(true);
 }
 
 async function deleteFromSpotify(uris) {
@@ -1123,6 +1160,7 @@ async function confirmDel(){
   toast(`Removing ${count} track${count!==1?'s':''}…`);
   try {
     await deleteFromSpotify(uris);
+    saveCache(tracks);
     toast(`Removed ${count} track${count!==1?'s':''}  ✓`);
   } catch(e) {
     toast(`Could not remove: ${e.message}`);
@@ -1249,7 +1287,7 @@ function commit(action, track) {
     lastDeleted = track;
     document.getElementById('undo-btn').disabled = false;
     deleteFromSpotify([track.uri])
-      .then(() => swipeMsg(`"${track.name}" deleted ✓`, 'var(--red)'))
+      .then(() => { saveCache(tracks); swipeMsg(`"${track.name}" deleted ✓`, 'var(--red)'); })
       .catch(e => {
         tracks.push(track);
         vFilteredCache = null;
