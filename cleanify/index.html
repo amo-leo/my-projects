@@ -155,6 +155,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
 .sprogfill{height:100%;background:linear-gradient(90deg,var(--green),#4dff91);border-radius:2px;transition:width .3s}
 .swipe-info{background:var(--s2);border:1px solid var(--border);border-radius:10px;margin:0 20px 10px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--mid);display:flex;align-items:center;gap:8px;flex-shrink:0}
 .swipe-info span{color:var(--green)}
+.swipe-status{height:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.3px;opacity:0;transition:opacity .2s}
 .card-stack{flex:1;width:100%;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .swipe-card{position:absolute;width:calc(100% - 40px);background:var(--s2);border-radius:24px;border:1px solid var(--border);overflow:hidden;touch-action:none;will-change:transform;cursor:grab;display:flex;flex-direction:column;max-height:56vh}
 .swipe-card.behind{transform:scale(.92) translateY(18px);z-index:0;pointer-events:none;transition:transform .3s cubic-bezier(.2,.8,.3,1);opacity:.55}
@@ -363,6 +364,7 @@ body::after{content:'';position:fixed;inset:0;background-image:url("data:image/s
     <div class="sppill" id="sp-label">0 removed</div>
   </div>
   <div class="sprogbar"><div class="sprogfill" id="sp-fill" style="width:0%"></div></div>
+  <div class="swipe-status" id="swipe-status"></div>
   <div class="card-stack" id="card-stack"></div>
   <div class="swipe-acts" id="swipe-acts">
     <button class="swipe-btn btn-undo" id="undo-btn" onclick="undoSwipe()" disabled>↩</button>
@@ -1228,7 +1230,7 @@ function commit(action, track) {
     lastDeleted = track;
     document.getElementById('undo-btn').disabled = false;
     deleteFromSpotify([track.uri])
-      .then(() => toast(`"${track.name}" deleted ✓`))
+      .then(() => swipeMsg(`"${track.name}" deleted ✓`, 'var(--red)'))
       .catch(e => {
         // Rollback local removal on failure
         tracks.push(track);
@@ -1236,7 +1238,7 @@ function commit(action, track) {
         sessionRemoved = Math.max(0, sessionRemoved - 1);
         lastDeleted = null;
         document.getElementById('undo-btn').disabled = !lastDeleted;
-        toast(`Could not delete: ${e.message}`);
+        swipeMsg(`Could not delete: ${e.message}`, 'var(--red)');
       });
   }
   // Reshuffle if we've gone through everything
@@ -1270,10 +1272,21 @@ async function undoSwipe() {
     vFilteredCache = null;
     sessionRemoved = Math.max(0, sessionRemoved - 1);
     updateSP();
-    toast(`"${track.name}" restored ↩`);
+    swipeMsg(`"${track.name}" restored ↩`, 'var(--green)');
   } catch(e) {
-    toast(`Could not restore: ${e.message}`);
+    swipeMsg(`Could not restore: ${e.message}`, 'var(--red)');
   }
+}
+
+let swipeMsgTimer = null;
+function swipeMsg(msg, color) {
+  const el = document.getElementById('swipe-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = color || 'var(--mid)';
+  el.style.opacity = '1';
+  clearTimeout(swipeMsgTimer);
+  swipeMsgTimer = setTimeout(() => { el.style.opacity = '0'; }, 2200);
 }
 
 function updateSP() {
