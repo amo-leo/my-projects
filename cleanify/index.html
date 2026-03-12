@@ -582,7 +582,9 @@ async function api(url, opts = {}, _retry = 0) {
     headers: { Authorization:`Bearer ${accessToken}`, 'Content-Type':'application/json', ...(opts.headers||{}) }
   });
   if (res.status === 429) {
-    const wait = parseInt(res.headers.get('Retry-After') || '2') * 1000;
+    if (_retry >= 3) throw new Error('Rate limited by Spotify — wait a minute and try again');
+    const wait = (parseInt(res.headers.get('Retry-After') || '2') + _retry * 2) * 1000;
+    setLoad('Loading your Liked Songs…', `Rate limited — retrying in ${Math.round(wait/1000)}s…`);
     await new Promise(r => setTimeout(r, wait));
     return api(url, opts, _retry + 1);
   }
@@ -599,14 +601,27 @@ async function loadLibrary() {
   tracks = [];
   let url = 'https://api.spotify.com/v1/me/tracks?limit=50';
   let skipped = 0;
+  let page = 0;
   try {
     while (url) {
-      const res = await api(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      page++;
+      // Per-request timeout of 15s so a stalled fetch surfaces as an error
+      const controller = new AbortController();
+      const tId = setTimeout(() => controller.abort(), 15000);
+      let res;
+      try {
+        res = await api(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(tId);
+      }
+      if (!res.ok) {
+        let errMsg = `HTTP ${res.status}`;
+        try { const b = await res.json(); errMsg = b?.error?.message || errMsg; } catch(_){}
+        throw new Error(errMsg);
+      }
       const data = await res.json();
       for (const item of (data.items||[])) {
         if (!item?.track) { skipped++; continue; }
-        // Skip local files (can't be deleted via API) and non-tracks
         if (item.track.uri?.startsWith('spotify:local:') || item.track.type !== 'track') {
           skipped++; continue;
         }
@@ -614,7 +629,7 @@ async function loadLibrary() {
         tracks.push({
           id: t.id, uri: t.uri,
           name: t.name,
-          artist: t.artists[0]?.name || 'Unknown',
+          artist: t.artists?.[0]?.name || 'Unknown',
           album: t.album?.name || '',
           added: new Date(item.added_at),
           duration: msToMin(t.duration_ms),
@@ -626,7 +641,7 @@ async function loadLibrary() {
       url = data.next;
       if (url) {
         setLoad(`Loading your Liked Songs…`, `${tracks.length} loaded so far…`);
-        await new Promise(r => setTimeout(r, 100)); // avoid 429 rate limits
+        await new Promise(r => setTimeout(r, 50)); // small pause to avoid 429
       }
     }
     isAuthed = true;
@@ -634,9 +649,11 @@ async function loadLibrary() {
     goTab('songs');
     if (skipped > 0) setTimeout(() => toast(`${skipped} local files/podcasts hidden — can't be removed via API`), 1200);
   } catch(e) {
-    console.error(e);
-    setLoad('Failed to load', e.message);
-    setTimeout(() => { showPage('page-login'); }, 3000);
+    console.error('loadLibrary failed:', e);
+    const msg = e.name === 'AbortError' ? 'Request timed out — check connection' : e.message;
+    setLoad('Failed to load :(', msg);
+    // Show the error for 5s then go back to login
+    setTimeout(() => { showPage('page-login'); }, 5000);
   }
 }
 
@@ -1421,6 +1438,5 @@ function dismissBanner() {
   localStorage.setItem('install_dismissed','1');
 }
 </script>
-  <script src="app.js"></script>
 </body>
 </html>
