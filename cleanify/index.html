@@ -1118,6 +1118,7 @@ async function confirmDel(){
 let sessionRemoved = 0;
 let lastDeleted = null; // single undo slot
 let audioUnlocked = false;
+let committing = false; // prevent double-tap
 
 function initSwipe(fresh) {
   stopSA();
@@ -1220,10 +1221,11 @@ function animOut(card, dir, cb) {
 }
 
 function commit(action, track) {
+  if (committing) return;
+  committing = true;
   si++;
   stopSA();
   if (action === 'delete') {
-    // Instantly remove from local list and fire API
     tracks = tracks.filter(t => t.id !== track.id);
     vFilteredCache = null;
     sessionRemoved++;
@@ -1232,22 +1234,20 @@ function commit(action, track) {
     deleteFromSpotify([track.uri])
       .then(() => swipeMsg(`"${track.name}" deleted ✓`, 'var(--red)'))
       .catch(e => {
-        // Rollback local removal on failure
         tracks.push(track);
         vFilteredCache = null;
         sessionRemoved = Math.max(0, sessionRemoved - 1);
         lastDeleted = null;
-        document.getElementById('undo-btn').disabled = !lastDeleted;
+        document.getElementById('undo-btn').disabled = true;
         swipeMsg(`Could not delete: ${e.message}`, 'var(--red)');
       });
   }
-  // Reshuffle if we've gone through everything
   if (si >= sq.length) {
-    sq = tracks.sort(() => Math.random() - .5);
+    sq = [...tracks].sort(() => Math.random() - .5);
     si = 0;
   }
   buildCards(); updateSP();
-  setTimeout(playCard, 80);
+  setTimeout(() => { playCard(); committing = false; }, 300);
 }
 
 function doSwipe(action) {
